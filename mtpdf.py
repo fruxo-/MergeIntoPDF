@@ -2,13 +2,14 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "pymupdf",
+#     "pymupdf>=1.24",
 #     "pillow",
 #     "opencv-python-headless",
+#     "fonttools",
 # ]
 # ///
 """
-merge_to_pdf.py
+mtpdf.py
 
 Combine a folder of PDFs, images, videos, and XLSX spreadsheets into a
 single PDF, labeling each item with its original filename.
@@ -33,20 +34,31 @@ number, followed by real PDF bookmarks (sidebar outline) for navigation.
 Any file that fails to process is skipped (not fatal) and reported as a
 red warning on stdout, with a final summary at the end.
 
+Language:
+  All text written INTO the PDF (table of contents title, captions, page
+  numbers) is translated. Choose it with --lang (default: it). Run
+  `mtpdf.py --list-languages` to see the available languages.
+  To add a language, see "HOW TO ADD A LANGUAGE" below the LANGUAGES table.
+
 Usage:
-    python3 merge_to_pdf.py /path/to/input_folder /path/to/output.pdf
+    python3 mtpdf.py INPUT_FOLDER OUTPUT.pdf [--lang CODE] [--font FILE]
+    python3 mtpdf.py --list-languages
 
 Requires:
-    pip3 install pymupdf pillow opencv-python-headless
+    pip3 install pymupdf pillow opencv-python-headless fonttools
     LibreOffice installed (for XLSX conversion): brew install --cask libreoffice
 """
 
-import sys
-import re
+import argparse
+import glob
+import html
 import os
-import tempfile
+import re
 import shutil
+import string
 import subprocess
+import sys
+import tempfile
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageOps
@@ -65,6 +77,7 @@ PDF_EXT = ".pdf"
 
 # ANSI colors for stdout warnings.
 RED = "\033[91m"
+YELLOW = "\033[93m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
@@ -77,19 +90,504 @@ SOFFICE_CANDIDATES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Languages
+# ---------------------------------------------------------------------------
+#
+# Every language is one entry in LANGUAGES, keyed by its ISO 639-1 code.
+#
+# HOW TO ADD A LANGUAGE
+#   1. Copy any block below (the English one is a good template).
+#   2. Change the key to the new language code, e.g. "pt".
+#   3. Translate the values of "strings". Keep the {placeholders} as they are
+#      (they are filled in by the program). Any string you leave out falls
+#      back to English, so a partial translation still works.
+#   4. Fonts:
+#        - If every character you used exists in Western Latin-1
+#          (Portuguese, Dutch, Swedish, ...), you are done: the built-in
+#          Helvetica font is used and nothing else is needed.
+#        - Otherwise (Cyrillic, Greek, Arabic, CJK, Indic, ...) the program
+#          looks for a suitable font installed on the computer. You can
+#          help it with the optional keys:
+#            "fonts":        list of font file paths / glob patterns to try
+#            "font_hint":    font name shown in the error message if none is found
+#            "builtin_font": last-resort PyMuPDF CJK font (china-s, china-t,
+#                            japan, korea); not embedded in the PDF
+#            "shaped":       True for scripts that need complex text shaping
+#                            (Devanagari and other Indic scripts, ...)
+#      A font file placed in a "fonts" folder next to this script is always
+#      tried first, and --font FILE overrides everything.
+#
+# Right-to-left scripts (Arabic, Hebrew, Urdu) are not supported yet.
+
+LANGUAGES = {
+    "it": {
+        "name": "Italiano",
+        "strings": {
+            "toc_title": "Indice degli allegati",
+            "toc_title_continued": "Indice degli allegati (continua)",
+            "video_first_frame": "{label} (primo fotogramma)",
+            "pdf_contents_of": "Contenuto di: {label}",
+            "video_caption": (
+                "Videoclip — mostrato il primo fotogramma. Fare riferimento "
+                "alla versione digitale per guardare il video completo."
+            ),
+            "audio_note": (
+                "File audio — fare riferimento alla versione digitale di "
+                "questo documento per ascoltare questo file."
+            ),
+            "page_x_of_y": "Pagina {page} di {total}",
+        },
+    },
+    "en": {
+        "name": "English",
+        "strings": {
+            "toc_title": "Index of attachments",
+            "toc_title_continued": "Index of attachments (continued)",
+            "video_first_frame": "{label} (first frame)",
+            "pdf_contents_of": "Contents of: {label}",
+            "video_caption": (
+                "Video clip — first frame shown. Refer to the digital "
+                "version to watch the full video."
+            ),
+            "audio_note": (
+                "Audio file — refer to the digital version of this "
+                "document to listen to this file."
+            ),
+            "page_x_of_y": "Page {page} of {total}",
+        },
+    },
+    "fr": {
+        "name": "Français",
+        "strings": {
+            "toc_title": "Index des pièces jointes",
+            "toc_title_continued": "Index des pièces jointes (suite)",
+            "video_first_frame": "{label} (première image)",
+            "pdf_contents_of": "Contenu de : {label}",
+            "video_caption": (
+                "Clip vidéo — première image affichée. Consultez la "
+                "version numérique pour regarder la vidéo complète."
+            ),
+            "audio_note": (
+                "Fichier audio — consultez la version numérique de ce "
+                "document pour écouter ce fichier."
+            ),
+            "page_x_of_y": "Page {page} sur {total}",
+        },
+    },
+    "es": {
+        "name": "Español",
+        "strings": {
+            "toc_title": "Índice de anexos",
+            "toc_title_continued": "Índice de anexos (continuación)",
+            "video_first_frame": "{label} (primer fotograma)",
+            "pdf_contents_of": "Contenido de: {label}",
+            "video_caption": (
+                "Videoclip — se muestra el primer fotograma. Consulte la "
+                "versión digital para ver el vídeo completo."
+            ),
+            "audio_note": (
+                "Archivo de audio — consulte la versión digital de este "
+                "documento para escuchar este archivo."
+            ),
+            "page_x_of_y": "Página {page} de {total}",
+        },
+    },
+    "de": {
+        "name": "Deutsch",
+        "strings": {
+            "toc_title": "Anlagenverzeichnis",
+            "toc_title_continued": "Anlagenverzeichnis (Fortsetzung)",
+            "video_first_frame": "{label} (erstes Einzelbild)",
+            "pdf_contents_of": "Inhalt von: {label}",
+            "video_caption": (
+                "Videoclip — es wird das erste Einzelbild angezeigt. Das "
+                "vollständige Video finden Sie in der digitalen Version."
+            ),
+            "audio_note": (
+                "Audiodatei — diese Datei können Sie in der digitalen "
+                "Version dieses Dokuments anhören."
+            ),
+            "page_x_of_y": "Seite {page} von {total}",
+        },
+    },
+    "ru": {
+        "name": "Русский",
+        "font_hint": "Noto Sans, Arial or DejaVu Sans",
+        "strings": {
+            "toc_title": "Список приложений",
+            "toc_title_continued": "Список приложений (продолжение)",
+            "video_first_frame": "{label} (первый кадр)",
+            "pdf_contents_of": "Содержимое: {label}",
+            "video_caption": (
+                "Видеоклип — показан первый кадр. "
+                "Полное видео смотрите в цифровой версии."
+            ),
+            "audio_note": (
+                "Аудиофайл — чтобы прослушать этот файл, "
+                "обратитесь к цифровой версии этого документа."
+            ),
+            "page_x_of_y": "Страница {page} из {total}",
+        },
+    },
+    "zh": {
+        "name": "中文（简体）",
+        "font_hint": "Noto Sans CJK SC",
+        "builtin_font": "china-s",
+        "fonts": [
+            # macOS
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            # Linux
+            "/usr/share/fonts/**/NotoSansCJK*-Regular.ttc",
+            "/usr/share/fonts/**/NotoSansSC*.[ot]tf",
+            "/usr/share/fonts/**/wqy-*.ttc",
+            "/usr/share/fonts/**/DroidSansFallback*.ttf",
+            # Windows
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simsun.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+        ],
+        "strings": {
+            "toc_title": "附件目录",
+            "toc_title_continued": "附件目录（续）",
+            "video_first_frame": "{label}（第一帧）",
+            "pdf_contents_of": "文件内容：{label}",
+            "video_caption": "视频片段：此处显示的是第一帧。如需观看完整视频，请参阅电子版。",
+            "audio_note": "音频文件：如需收听此文件，请参阅本文档的电子版。",
+            "page_x_of_y": "第 {page} 页，共 {total} 页",
+        },
+    },
+    "ja": {
+        "name": "日本語",
+        "font_hint": "Noto Sans CJK JP",
+        "builtin_font": "japan",
+        "fonts": [
+            # macOS
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            # Linux
+            "/usr/share/fonts/**/NotoSansCJK*-Regular.ttc",
+            "/usr/share/fonts/**/NotoSansJP*.[ot]tf",
+            "/usr/share/fonts/**/ipag*.ttf",
+            "/usr/share/fonts/**/takao*.ttf",
+            # Windows
+            "C:/Windows/Fonts/YuGothR.ttc",
+            "C:/Windows/Fonts/meiryo.ttc",
+            "C:/Windows/Fonts/msgothic.ttc",
+        ],
+        "strings": {
+            "toc_title": "添付資料目次",
+            "toc_title_continued": "添付資料目次（続き）",
+            "video_first_frame": "{label}（最初のフレーム）",
+            "pdf_contents_of": "内容：{label}",
+            "video_caption": "ビデオクリップ：最初のフレームを表示しています。完全な動画はデジタル版でご覧ください。",
+            "audio_note": "音声ファイル：このファイルを再生するには、本書のデジタル版をご覧ください。",
+            "page_x_of_y": "{total} ページ中 {page} ページ",
+        },
+    },
+    "hi": {
+        "name": "हिन्दी",
+        "font_hint": "Noto Sans Devanagari",
+        "shaped": True,  # Devanagari needs complex text shaping
+        "fonts": [
+            # macOS
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+            # Linux
+            "/usr/share/fonts/**/NotoSansDevanagari-Regular.ttf",
+            "/usr/share/fonts/**/NotoSansDevanagariUI-Regular.ttf",
+            "/usr/share/fonts/**/Lohit-Devanagari.ttf",
+            "/usr/share/fonts/**/Mukta-Regular.ttf",
+            # Windows
+            "C:/Windows/Fonts/Nirmala.ttf",
+            "C:/Windows/Fonts/mangal.ttf",
+        ],
+        "strings": {
+            "toc_title": "संलग्नकों की अनुक्रमणिका",
+            "toc_title_continued": "संलग्नकों की अनुक्रमणिका (जारी)",
+            "video_first_frame": "{label} (पहला फ़्रेम)",
+            "pdf_contents_of": "सामग्री: {label}",
+            "video_caption": (
+                "वीडियो क्लिप: पहला फ़्रेम दिखाया गया है। "
+                "पूरा वीडियो देखने के लिए डिजिटल संस्करण देखें।"
+            ),
+            "audio_note": (
+                "ऑडियो फ़ाइल: इस फ़ाइल को सुनने के लिए "
+                "इस दस्तावेज़ का डिजिटल संस्करण देखें।"
+            ),
+            "page_x_of_y": "पृष्ठ {page} / {total}",
+        },
+    },
+}
+
+DEFAULT_LANGUAGE = "it"   # kept as the default so existing usage is unchanged
+FALLBACK_LANGUAGE = "en"  # used for any string a language does not define
+
+# Set by configure_language() at startup.
+STRINGS = {}
+FACE = None
+
+
+def tr(key, **kwargs):
+    """Return the translated string for `key` in the selected language."""
+    return STRINGS[key].format(**kwargs)
+
+
+def language_code(value):
+    """argparse type: accept 'it', 'IT', 'zh-CN', 'zh_cn', ... -> 'it' / 'zh'."""
+    key = value.strip().lower().replace("_", "-")
+    for candidate in (key, key.split("-")[0]):
+        if candidate in LANGUAGES:
+            return candidate
+    raise argparse.ArgumentTypeError(
+        f"unknown language '{value}'. Available: {', '.join(sorted(LANGUAGES))}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fonts
+# ---------------------------------------------------------------------------
+#
+# Latin-1 languages use the built-in Helvetica. Other scripts need a real font:
+# we look for one on the system (or in ./fonts next to this script), and only
+# accept a font that actually contains every character the language needs.
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
+
+# Broad-coverage fonts tried for any language after its own "fonts" list.
+GENERIC_FONT_PATTERNS = [
+    # macOS
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "~/Library/Fonts/NotoSans-Regular.ttf",
+    # Linux
+    "/usr/share/fonts/**/NotoSans-Regular.ttf",
+    "/usr/share/fonts/**/DejaVuSans.ttf",
+    "/usr/share/fonts/**/LiberationSans-Regular.ttf",
+    "~/.local/share/fonts/**/NotoSans-Regular.ttf",
+    "~/.fonts/**/NotoSans-Regular.ttf",
+    # Windows
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+]
+
+
+def warn(message):
+    print(f"{YELLOW}{BOLD}WARNING:{RESET}{YELLOW} {message}{RESET}")
+
+
+def _chars_needed(strings):
+    """Characters that must exist in the font (all translated text + digits)."""
+    text = "".join(re.sub(r"\{[^}]*\}", "", s) for s in strings.values())
+    text += string.digits
+    return sorted({c for c in text if not c.isspace()})
+
+
+def _missing_glyphs(font, chars):
+    return [c for c in chars if not font.has_glyph(ord(c))]
+
+
+def _fits_builtin_font(chars):
+    """True if all chars can be drawn with the built-in Latin-1 Helvetica."""
+    try:
+        "".join(chars).encode("cp1252")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _expand(patterns):
+    seen = set()
+    for pattern in patterns:
+        for path in sorted(glob.glob(os.path.expanduser(pattern), recursive=True)):
+            if os.path.isfile(path) and path not in seen:
+                seen.add(path)
+                yield path
+
+
+def _fontconfig_candidates(code):
+    """Ask fontconfig (Linux/macOS with fontconfig) for a font for this language."""
+    exe = shutil.which("fc-match")
+    if not exe:
+        return
+    for query in (f":lang={code}", f"sans:lang={code}"):
+        try:
+            out = subprocess.run(
+                [exe, "-f", "%{file}", query],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        except Exception:
+            continue
+        if out and os.path.isfile(out):
+            yield out
+
+
+def _font_candidates(code, pack):
+    local = [os.path.join(glob.escape(LOCAL_FONT_DIR), ext) for ext in ("*.ttf", "*.otf", "*.ttc")]
+    yield from _expand(local)
+    yield from _expand(pack.get("fonts", []))
+    yield from _expand(GENERIC_FONT_PATTERNS)
+    yield from _fontconfig_candidates(code)
+
+
+def _font_usable(path, required):
+    """True if the font has every required glyph AND PyMuPDF can embed it."""
+    try:
+        font = fitz.Font(fontfile=path)
+        if _missing_glyphs(font, required):
+            return False
+        probe = fitz.open()
+        probe.new_page().insert_text((10, 20), "A", fontname="probe", fontfile=path)
+        probe.close()
+        return True
+    except Exception:
+        return False
+
+
+class Typeface:
+    """
+    Measures and draws text with one font, hiding the differences between the
+    built-in fonts, font files, and scripts that need text shaping.
+    """
+
+    def __init__(self, kind, ref, shaped=False):
+        self.kind = kind      # "builtin" or "file"
+        self.ref = ref        # PyMuPDF font name, or path of the font file
+        self.shaped = shaped  # draw through the HTML engine (complex scripts)
+        self._font = None
+        self._alias = "MTFont"
+        self._archive = None
+        self._story_font = None
+
+        if kind == "file":
+            self._font = fitz.Font(fontfile=ref)
+            if shaped:
+                # The HTML engine loads fonts through an archive (a folder).
+                ext = os.path.splitext(ref)[1].lower() or ".ttf"
+                self._story_font = f"shapedfont{ext}"
+                shutil.copyfile(ref, os.path.join(TEMP_DIR, self._story_font))
+                self._archive = fitz.Archive(TEMP_DIR)
+
+    def width(self, text, size):
+        if self.kind == "builtin":
+            return fitz.get_text_length(text, fontname=self.ref, fontsize=size)
+        return self._font.text_length(text, fontsize=size)
+
+    def draw(self, page, x, y, text, size, color=(0, 0, 0)):
+        """Draw `text` with its baseline at y and its left edge at x."""
+        if self.kind == "builtin":
+            page.insert_text((x, y), text, fontsize=size, fontname=self.ref, color=color)
+        elif self.shaped:
+            self._draw_shaped(page, x, y, text, size, color)
+        else:
+            page.insert_text(
+                (x, y), text, fontsize=size,
+                fontname=self._alias, fontfile=self.ref, color=color,
+            )
+
+    def _draw_shaped(self, page, x, y, text, size, color):
+        # insert_text() does not shape complex scripts (matras and conjuncts
+        # would come out wrong), so these go through the HTML engine, which
+        # does. Wrapping is already done by the caller, hence nowrap.
+        width = self.width(text, size) * 1.25 + size
+        rect = fitz.Rect(x, y - size * 1.0, x + width, y + size * 0.8)
+        r, g, b = (round(c * 255) for c in color)
+        css = (
+            "@font-face { font-family: tf; src: url(%s); } "
+            "body, p { margin: 0; padding: 0; font-family: tf; font-size: %.2fpt; "
+            "line-height: 1.2; white-space: nowrap; color: rgb(%d, %d, %d); }"
+        ) % (self._story_font, size, r, g, b)
+        page.insert_htmlbox(
+            rect, "<p>%s</p>" % html.escape(text), css=css, archive=self._archive
+        )
+
+
+def build_typeface(code, pack, strings, font_override=None):
+    """Pick the font used for the whole PDF (see the notes above)."""
+    shaped = bool(pack.get("shaped"))
+    required = _chars_needed(strings)
+
+    def check_latin(path):
+        # Not fatal: only matters for the Latin letters in filenames.
+        try:
+            missing = _missing_glyphs(fitz.Font(fontfile=path), string.ascii_letters)
+        except Exception:
+            return
+        if missing:
+            warn(
+                f"font '{os.path.basename(path)}' has no Latin letters, so filenames "
+                "may show up as empty boxes. Use --font with a font that covers both."
+            )
+
+    if font_override:
+        if not os.path.isfile(font_override):
+            sys.exit(f"Error: font file not found: {font_override}")
+        try:
+            font = fitz.Font(fontfile=font_override)
+        except Exception as e:
+            sys.exit(f"Error: cannot load font '{font_override}': {e}")
+        missing = _missing_glyphs(font, required)
+        if missing:
+            warn(
+                f"font '{os.path.basename(font_override)}' lacks these characters: "
+                + " ".join(missing)
+            )
+        check_latin(font_override)
+        return Typeface("file", font_override, shaped)
+
+    if _fits_builtin_font(required):
+        return Typeface("builtin", "helv")
+
+    for path in _font_candidates(code, pack):
+        if _font_usable(path, required):
+            check_latin(path)
+            return Typeface("file", path, shaped)
+
+    if pack.get("builtin_font"):
+        warn(
+            f"no suitable font found for '{code}'; falling back to the built-in "
+            f"'{pack['builtin_font']}' font, which is not embedded in the PDF."
+        )
+        return Typeface("builtin", pack["builtin_font"])
+
+    hint = pack.get("font_hint", "Noto Sans")
+    sys.exit(
+        f"Error: no installed font covers the '{code}' text.\n"
+        f"Install one (for example {hint}) and either put the .ttf/.otf file in\n"
+        f"  {LOCAL_FONT_DIR}\n"
+        "or pass it explicitly with --font /path/to/font.ttf"
+    )
+
+
+def configure_language(code, font_override=None):
+    """Select the PDF language: loads its strings and picks its font."""
+    global STRINGS, FACE
+    pack = LANGUAGES[code]
+    STRINGS = {**LANGUAGES[FALLBACK_LANGUAGE]["strings"], **pack["strings"]}
+    FACE = build_typeface(code, pack, STRINGS, font_override)
+
+
+# ---------------------------------------------------------------------------
+# Layout helpers
+# ---------------------------------------------------------------------------
+
 def natural_key(s):
     """Sort key so 'file2' comes before 'file10'."""
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
-def wrap_text(text, fontname, fontsize, max_width):
+def wrap_text(text, fontsize, max_width):
     """Break text into lines that each fit within max_width."""
     words = text.split(" ")
     lines = []
     current = ""
 
     def fits(s):
-        return fitz.get_text_length(s, fontname=fontname, fontsize=fontsize) <= max_width
+        return FACE.width(s, fontsize) <= max_width
 
     for word in words:
         candidate = f"{current} {word}".strip()
@@ -98,7 +596,8 @@ def wrap_text(text, fontname, fontsize, max_width):
         else:
             if current:
                 lines.append(current)
-            # word itself might be longer than max_width (long filename, no spaces)
+            # word itself might be longer than max_width (long filename, or
+            # a language written without spaces such as Chinese or Japanese)
             if fits(word):
                 current = word
             else:
@@ -125,18 +624,12 @@ def add_label(page, text, y=MARGIN, fontsize=FONT_SIZE, max_width=None):
     if max_width is None:
         max_width = PAGE_WIDTH - 2 * MARGIN
 
-    lines = wrap_text(text, "helv", fontsize, max_width)
+    lines = wrap_text(text, fontsize, max_width)
     line_height = fontsize * 1.3
 
     cursor_y = y
     for line in lines:
-        page.insert_text(
-            (MARGIN, cursor_y),
-            line,
-            fontsize=fontsize,
-            fontname="helv",
-            color=(0, 0, 0),
-        )
+        FACE.draw(page, MARGIN, cursor_y, line, fontsize)
         cursor_y += line_height
 
     underline_y = cursor_y - line_height + fontsize * 0.4
@@ -256,7 +749,7 @@ def add_image_page(out_doc, image_path, label, is_video=False):
     prepared_path = prepare_image(image_path, is_video)
 
     page = out_doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
-    label_text = f"{label} (primo fotogramma)" if is_video else label
+    label_text = tr("video_first_frame", label=label) if is_video else label
     label_height = add_label(page, label_text)
 
     img_top = MARGIN + label_height + 6
@@ -287,7 +780,7 @@ def add_pdf_with_title(out_doc, pdf_path, label):
 
     big_fontsize = 16
     max_width = PAGE_WIDTH - 2 * MARGIN
-    big_lines = wrap_text(f"Contenuto di: {label}", "helv", big_fontsize, max_width)
+    big_lines = wrap_text(tr("pdf_contents_of", label=label), big_fontsize, max_width)
     big_line_height = big_fontsize * 1.3
 
     # Vertically center the (possibly multiline) big text in the space
@@ -299,13 +792,7 @@ def add_pdf_with_title(out_doc, pdf_path, label):
 
     cursor_y = start_y
     for line in big_lines:
-        title_page.insert_text(
-            (MARGIN, cursor_y),
-            line,
-            fontsize=big_fontsize,
-            fontname="helv",
-            color=(0, 0, 0),
-        )
+        FACE.draw(title_page, MARGIN, cursor_y, line, big_fontsize)
         cursor_y += big_line_height
 
     with fitz.open(pdf_path) as src:
@@ -358,6 +845,13 @@ def draw_video_badge(page, cx, cy, radius=18):
     shape.commit()
 
 
+def draw_centered_lines(page, lines, top_y, fontsize, line_height, color):
+    """Draw each line horizontally centered on the page, starting at top_y."""
+    for i, line in enumerate(lines):
+        x = (PAGE_WIDTH - FACE.width(line, fontsize)) / 2
+        FACE.draw(page, x, top_y + i * line_height, line, fontsize, color)
+
+
 def add_video_caption(page, y):
     """Draw a play-button icon plus a centered 'video clip' caption at
     vertical position y. Returns the height the caption block occupied."""
@@ -367,26 +861,13 @@ def add_video_caption(page, y):
     line_height = caption_fontsize * 1.4
 
     max_width = PAGE_WIDTH - 2 * MARGIN
-    lines = wrap_text(
-        "Videoclip \u2014 mostrato il primo fotogramma. Fare riferimento "
-        "alla versione digitale per guardare il video completo.",
-        "helv", caption_fontsize, max_width,
-    )
+    lines = wrap_text(tr("video_caption"), caption_fontsize, max_width)
 
     icon_cy = y + icon_radius
     draw_video_badge(page, PAGE_WIDTH / 2, icon_cy, radius=icon_radius)
 
     text_top = icon_cy + icon_radius + gap_after_icon
-    for i, line in enumerate(lines):
-        line_width = fitz.get_text_length(line, fontname="helv", fontsize=caption_fontsize)
-        x = (PAGE_WIDTH - line_width) / 2
-        page.insert_text(
-            (x, text_top + i * line_height),
-            line,
-            fontsize=caption_fontsize,
-            fontname="helv",
-            color=(0.25, 0.25, 0.25),
-        )
+    draw_centered_lines(page, lines, text_top, caption_fontsize, line_height, (0.25, 0.25, 0.25))
 
     return (text_top + len(lines) * line_height) - y
 
@@ -402,28 +883,12 @@ def add_audio_placeholder_page(out_doc, label):
 
     note_fontsize = 13
     max_width = PAGE_WIDTH - 2 * MARGIN
-    note_lines = wrap_text(
-        "File audio \u2014 fare riferimento alla versione digitale di "
-        "questo documento per ascoltare questo file.",
-        "helv", note_fontsize, max_width,
-    )
+    note_lines = wrap_text(tr("audio_note"), note_fontsize, max_width)
     line_height = note_fontsize * 1.4
     text_top = cy + 90
-    # Center the note block horizontally line by line.
-    for i, line in enumerate(note_lines):
-        line_width = fitz.get_text_length(line, fontname="helv", fontsize=note_fontsize)
-        x = (PAGE_WIDTH - line_width) / 2
-        page.insert_text(
-            (x, text_top + i * line_height),
-            line,
-            fontsize=note_fontsize,
-            fontname="helv",
-            color=(0.25, 0.25, 0.25),
-        )
+    draw_centered_lines(page, note_lines, text_top, note_fontsize, line_height, (0.25, 0.25, 0.25))
 
 
-TOC_TITLE = "Indice degli allegati"
-TOC_TITLE_CONTINUED = "Indice degli allegati (continua)"
 TOC_FONTSIZE = 11
 TOC_TITLE_FONTSIZE = 18
 TOC_LINE_HEIGHT = TOC_FONTSIZE * 1.6
@@ -447,13 +912,13 @@ def compute_toc_page_count(num_entries):
     return -(-num_entries // per_page)  # ceil division
 
 
-def truncate_to_width(text, fontname, fontsize, max_width):
+def truncate_to_width(text, fontsize, max_width):
     """Truncate text with an ellipsis so it fits within max_width."""
-    if fitz.get_text_length(text, fontname=fontname, fontsize=fontsize) <= max_width:
+    if FACE.width(text, fontsize) <= max_width:
         return text
     for i in range(len(text), 0, -1):
         candidate = text[:i].rstrip() + "\u2026"
-        if fitz.get_text_length(candidate, fontname=fontname, fontsize=fontsize) <= max_width:
+        if FACE.width(candidate, fontsize) <= max_width:
             return candidate
     return "\u2026"
 
@@ -473,70 +938,99 @@ def build_toc_pages(toc_doc, entries, page_offset):
         is_first = (start == 0)
 
         page = toc_doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
-        title_text = TOC_TITLE if is_first else TOC_TITLE_CONTINUED
-        page.insert_text(
-            (MARGIN, MARGIN + TOC_TITLE_FONTSIZE),
-            title_text,
-            fontsize=TOC_TITLE_FONTSIZE,
-            fontname="helv",
-            color=(0, 0, 0),
-        )
+        title_text = tr("toc_title") if is_first else tr("toc_title_continued")
+        FACE.draw(page, MARGIN, MARGIN + TOC_TITLE_FONTSIZE, title_text, TOC_TITLE_FONTSIZE)
 
         cursor_y = MARGIN + _toc_title_block_height()
         for label, start_idx in chunk:
             page_num = start_idx + page_offset + 1
             page_num_text = str(page_num)
-            trunc_label = truncate_to_width(label, "helv", TOC_FONTSIZE, label_max_width)
+            trunc_label = truncate_to_width(label, TOC_FONTSIZE, label_max_width)
 
-            page.insert_text(
-                (MARGIN, cursor_y + TOC_FONTSIZE),
-                trunc_label,
-                fontsize=TOC_FONTSIZE,
-                fontname="helv",
-                color=(0, 0, 0),
-            )
-            num_width = fitz.get_text_length(page_num_text, fontname="helv", fontsize=TOC_FONTSIZE)
-            page.insert_text(
-                (PAGE_WIDTH - MARGIN - num_width, cursor_y + TOC_FONTSIZE),
-                page_num_text,
-                fontsize=TOC_FONTSIZE,
-                fontname="helv",
-                color=(0, 0, 0),
+            FACE.draw(page, MARGIN, cursor_y + TOC_FONTSIZE, trunc_label, TOC_FONTSIZE)
+            num_width = FACE.width(page_num_text, TOC_FONTSIZE)
+            FACE.draw(
+                page, PAGE_WIDTH - MARGIN - num_width, cursor_y + TOC_FONTSIZE,
+                page_num_text, TOC_FONTSIZE,
             )
             cursor_y += TOC_LINE_HEIGHT
 
 
 def add_page_numbers(doc):
-    """Stamp 'Pagina N di TOTALE' centered in the bottom margin of every page."""
+    """Stamp the translated 'Page N of TOTAL' centered in the bottom margin of every page."""
     fontsize = 9
     total = doc.page_count
     y = PAGE_HEIGHT - 20
 
     for i in range(total):
         page = doc[i]
-        text = f"Pagina {i + 1} di {total}"
-        width = fitz.get_text_length(text, fontname="helv", fontsize=fontsize)
-        x = (PAGE_WIDTH - width) / 2
-        page.insert_text(
-            (x, y),
-            text,
-            fontsize=fontsize,
-            fontname="helv",
-            color=(0.4, 0.4, 0.4),
-        )
+        text = tr("page_x_of_y", page=i + 1, total=total)
+        x = (PAGE_WIDTH - FACE.width(text, fontsize)) / 2
+        FACE.draw(page, x, y, text, fontsize, (0.4, 0.4, 0.4))
+
+
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+
+def print_languages():
+    print("Available languages (use with --lang):")
+    for code in sorted(LANGUAGES):
+        default = "  (default)" if code == DEFAULT_LANGUAGE else ""
+        print(f"  {code:<4}{LANGUAGES[code]['name']}{default}")
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="mtpdf.py",
+        description=(
+            "Combine a folder of PDFs, images, videos, spreadsheets and audio "
+            "files into a single PDF, labeling each item with its filename."
+        ),
+    )
+    parser.add_argument("input_folder", nargs="?", help="folder containing the files to merge")
+    parser.add_argument("output", nargs="?", help="path of the PDF to create")
+    parser.add_argument(
+        "-l", "--lang",
+        type=language_code,
+        default=DEFAULT_LANGUAGE,
+        metavar="CODE",
+        help=(
+            "language of the text written into the PDF "
+            f"(default: {DEFAULT_LANGUAGE}; available: {', '.join(sorted(LANGUAGES))}). "
+            "Regional forms such as zh-CN are accepted."
+        ),
+    )
+    parser.add_argument(
+        "--font",
+        metavar="FILE",
+        help="use this .ttf/.otf font file for all text (needed if no suitable font is auto-detected)",
+    )
+    parser.add_argument(
+        "--list-languages",
+        action="store_true",
+        help="list the available languages and exit",
+    )
+    args = parser.parse_args(argv)
+
+    if args.list_languages:
+        print_languages()
+        sys.exit(0)
+    if not args.input_folder or not args.output:
+        parser.error("the following arguments are required: input_folder, output")
+    return args
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python3 merge_to_pdf.py <input_folder> <output.pdf>")
-        sys.exit(1)
-
-    input_folder = sys.argv[1]
-    output_path = sys.argv[2]
+    args = parse_args()
+    input_folder = args.input_folder
+    output_path = args.output
 
     if not os.path.isdir(input_folder):
         print(f"Error: {input_folder} is not a folder")
         sys.exit(1)
+
+    configure_language(args.lang, args.font)
 
     all_exts = IMAGE_EXTS | VIDEO_EXTS | SPREADSHEET_EXTS | AUDIO_EXTS | {PDF_EXT}
     files = [
@@ -550,7 +1044,10 @@ def main():
         print("No PDF/image/video files found in that folder.")
         sys.exit(1)
 
-    print(f"Found {len(files)} files. Merging...")
+    print(
+        f"Found {len(files)} files. Merging... "
+        f"(PDF language: {LANGUAGES[args.lang]['name']} [{args.lang}])"
+    )
 
     content_doc = fitz.open()
     toc_doc = None
@@ -602,7 +1099,18 @@ def main():
                 pass  # bookmarks are a bonus; don't fail the whole run over them
 
         add_page_numbers(final_doc)
-        final_doc.save(output_path)
+
+        if FACE.kind == "file":
+            # Embedded font files can be large (CJK fonts especially) and are
+            # added once per page. Keep only the glyphs actually used, and
+            # merge duplicate objects. Both are optional size optimizations.
+            try:
+                final_doc.subset_fonts()
+            except Exception:
+                pass
+            final_doc.save(output_path, garbage=4, deflate=True)
+        else:
+            final_doc.save(output_path)
         print(f"\nDone. Saved combined PDF to: {output_path}")
 
         if failures:
