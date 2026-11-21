@@ -60,7 +60,7 @@ import subprocess
 import sys
 import tempfile
 
-import fitz  # PyMuPDF
+import pymupdf
 from PIL import Image, ImageOps
 import cv2
 
@@ -437,10 +437,10 @@ def _font_candidates(code, pack):
 def _font_usable(path, required):
     """True if the font has every required glyph AND PyMuPDF can embed it."""
     try:
-        font = fitz.Font(fontfile=path)
+        font = pymupdf.Font(fontfile=path)
         if _missing_glyphs(font, required):
             return False
-        probe = fitz.open()
+        probe = pymupdf.open()
         probe.new_page().insert_text((10, 20), "A", fontname="probe", fontfile=path)
         probe.close()
         return True
@@ -464,17 +464,17 @@ class Typeface:
         self._story_font = None
 
         if kind == "file":
-            self._font = fitz.Font(fontfile=ref)
+            self._font = pymupdf.Font(fontfile=ref)
             if shaped:
                 # The HTML engine loads fonts through an archive (a folder).
                 ext = os.path.splitext(ref)[1].lower() or ".ttf"
                 self._story_font = f"shapedfont{ext}"
                 shutil.copyfile(ref, os.path.join(TEMP_DIR, self._story_font))
-                self._archive = fitz.Archive(TEMP_DIR)
+                self._archive = pymupdf.Archive(TEMP_DIR)
 
     def width(self, text, size):
         if self.kind == "builtin":
-            return fitz.get_text_length(text, fontname=self.ref, fontsize=size)
+            return pymupdf.get_text_length(text, fontname=self.ref, fontsize=size)
         return self._font.text_length(text, fontsize=size)
 
     def draw(self, page, x, y, text, size, color=(0, 0, 0)):
@@ -494,7 +494,7 @@ class Typeface:
         # would come out wrong), so these go through the HTML engine, which
         # does. Wrapping is already done by the caller, hence nowrap.
         width = self.width(text, size) * 1.25 + size
-        rect = fitz.Rect(x, y - size * 1.0, x + width, y + size * 0.8)
+        rect = pymupdf.Rect(x, y - size * 1.0, x + width, y + size * 0.8)
         r, g, b = (round(c * 255) for c in color)
         css = (
             "@font-face { font-family: tf; src: url(%s); } "
@@ -514,7 +514,7 @@ def build_typeface(code, pack, strings, font_override=None):
     def check_latin(path):
         # Not fatal: only matters for the Latin letters in filenames.
         try:
-            missing = _missing_glyphs(fitz.Font(fontfile=path), string.ascii_letters)
+            missing = _missing_glyphs(pymupdf.Font(fontfile=path), string.ascii_letters)
         except Exception:
             return
         if missing:
@@ -527,7 +527,7 @@ def build_typeface(code, pack, strings, font_override=None):
         if not os.path.isfile(font_override):
             sys.exit(f"Error: font file not found: {font_override}")
         try:
-            font = fitz.Font(fontfile=font_override)
+            font = pymupdf.Font(fontfile=font_override)
         except Exception as e:
             sys.exit(f"Error: cannot load font '{font_override}': {e}")
         missing = _missing_glyphs(font, required)
@@ -765,7 +765,7 @@ def add_image_page(out_doc, image_path, label, is_video=False):
     draw_w, draw_h = compute_placement(img_w, img_h, avail_w, avail_h)
     x0 = MARGIN + (avail_w - draw_w) / 2
     y0 = img_top + (avail_h - draw_h) / 2
-    rect = fitz.Rect(x0, y0, x0 + draw_w, y0 + draw_h)
+    rect = pymupdf.Rect(x0, y0, x0 + draw_w, y0 + draw_h)
 
     page.insert_image(rect, filename=prepared_path)
 
@@ -795,7 +795,7 @@ def add_pdf_with_title(out_doc, pdf_path, label):
         FACE.draw(title_page, MARGIN, cursor_y, line, big_fontsize)
         cursor_y += big_line_height
 
-    with fitz.open(pdf_path) as src:
+    with pymupdf.open(pdf_path) as src:
         out_doc.insert_pdf(src)
 
 
@@ -805,13 +805,13 @@ def draw_audio_icon(page, cx, cy, scale=1.0):
 
     # Speaker body: rectangle base + trapezoid cone, as one closed polygon.
     speaker_points = [
-        fitz.Point(cx - 50 * scale, cy - 15 * scale),
-        fitz.Point(cx - 25 * scale, cy - 15 * scale),
-        fitz.Point(cx, cy - 40 * scale),
-        fitz.Point(cx, cy + 40 * scale),
-        fitz.Point(cx - 25 * scale, cy + 15 * scale),
-        fitz.Point(cx - 50 * scale, cy + 15 * scale),
-        fitz.Point(cx - 50 * scale, cy - 15 * scale),
+        pymupdf.Point(cx - 50 * scale, cy - 15 * scale),
+        pymupdf.Point(cx - 25 * scale, cy - 15 * scale),
+        pymupdf.Point(cx, cy - 40 * scale),
+        pymupdf.Point(cx, cy + 40 * scale),
+        pymupdf.Point(cx - 25 * scale, cy + 15 * scale),
+        pymupdf.Point(cx - 50 * scale, cy + 15 * scale),
+        pymupdf.Point(cx - 50 * scale, cy - 15 * scale),
     ]
     shape = page.new_shape()
     shape.draw_polyline(speaker_points)
@@ -819,9 +819,9 @@ def draw_audio_icon(page, cx, cy, scale=1.0):
 
     # Sound waves: three curved arcs radiating to the right of the cone tip.
     for radius in (15 * scale, 30 * scale, 45 * scale):
-        top = fitz.Point(cx + radius * 0.3, cy - radius)
-        bottom = fitz.Point(cx + radius * 0.3, cy + radius)
-        ctrl = fitz.Point(cx + radius * 1.3, cy)
+        top = pymupdf.Point(cx + radius * 0.3, cy - radius)
+        bottom = pymupdf.Point(cx + radius * 0.3, cy + radius)
+        ctrl = pymupdf.Point(cx + radius * 1.3, cy)
         shape.draw_curve(top, ctrl, bottom)
     shape.finish(color=color, width=3 * scale)
 
@@ -832,13 +832,13 @@ def draw_video_badge(page, cx, cy, radius=18):
     """Draw a circular play-button badge (video indicator) at (cx, cy)."""
     color = (0.25, 0.25, 0.25)
     shape = page.new_shape()
-    shape.draw_circle(fitz.Point(cx, cy), radius)
+    shape.draw_circle(pymupdf.Point(cx, cy), radius)
     shape.finish(color=color, fill=(1, 1, 1), width=2)
 
     tri_size = radius * 0.8
-    p1 = fitz.Point(cx - tri_size * 0.35, cy - tri_size * 0.55)
-    p2 = fitz.Point(cx - tri_size * 0.35, cy + tri_size * 0.55)
-    p3 = fitz.Point(cx + tri_size * 0.55, cy)
+    p1 = pymupdf.Point(cx - tri_size * 0.35, cy - tri_size * 0.55)
+    p2 = pymupdf.Point(cx - tri_size * 0.35, cy + tri_size * 0.55)
+    p3 = pymupdf.Point(cx + tri_size * 0.55, cy)
     shape.draw_polyline([p1, p2, p3, p1])
     shape.finish(color=color, fill=color, closePath=True)
 
@@ -1049,7 +1049,7 @@ def main():
         f"(PDF language: {LANGUAGES[args.lang]['name']} [{args.lang}])"
     )
 
-    content_doc = fitz.open()
+    content_doc = pymupdf.open()
     toc_doc = None
     final_doc = None
     failures = []
@@ -1080,10 +1080,10 @@ def main():
 
         toc_page_count = compute_toc_page_count(len(entries))
         if toc_page_count > 0:
-            toc_doc = fitz.open()
+            toc_doc = pymupdf.open()
             build_toc_pages(toc_doc, entries, toc_page_count)
 
-        final_doc = fitz.open()
+        final_doc = pymupdf.open()
         if toc_doc is not None:
             final_doc.insert_pdf(toc_doc)
         final_doc.insert_pdf(content_doc)
