@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "pymupdf>=1.24",
+#     "pymupdf>=1.24,<2",
 #     "pillow",
 #     "opencv-python-headless",
 #     "fonttools",
@@ -45,7 +45,7 @@ Usage:
     python3 mtpdf.py --list-languages
 
 Requires:
-    pip3 install pymupdf pillow opencv-python-headless fonttools
+    pip3 install "pymupdf>=1.24,<2" pillow opencv-python-headless fonttools
     LibreOffice installed (for XLSX conversion): brew install --cask libreoffice
 """
 
