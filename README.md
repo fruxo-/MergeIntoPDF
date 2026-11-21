@@ -100,7 +100,7 @@ The new code then appears automatically in `--list-languages` and `--help`.
 ## Requirements
 
 - **Python 3.9 or newer**
-- Python packages: [`pymupdf`](https://pymupdf.readthedocs.io/) (1.24 or newer), [`pillow`](https://python-pillow.org/), [`opencv-python-headless`](https://pypi.org/project/opencv-python-headless/), [`fonttools`](https://pypi.org/project/fonttools/) (used to shrink embedded fonts)
+- Python packages: [`pymupdf`](https://pymupdf.readthedocs.io/) (1.24 or newer, but below 2.0), [`pillow`](https://python-pillow.org/), [`opencv-python-headless`](https://pypi.org/project/opencv-python-headless/), [`fonttools`](https://pypi.org/project/fonttools/) (used to shrink embedded fonts)
 - A font covering the language, only for Russian, Chinese, Japanese and Hindi (see [Fonts for non-Latin languages](#fonts-for-non-latin-languages))
 - **LibreOffice**, only needed if your folder contains spreadsheets (`.xlsx`, `.xls`, `.xlsm`)
 
@@ -149,7 +149,7 @@ cd MergeIntoPDF
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-pip install "pymupdf>=1.24" pillow opencv-python-headless fonttools
+pip install "pymupdf>=1.24,<2" pillow opencv-python-headless fonttools
 
 python3 mtpdf.py /path/to/input_folder /path/to/output.pdf
 ```
@@ -213,7 +213,8 @@ Things to know:
 |---|---|
 | `LibreOffice not found` | LibreOffice is not installed or `soffice` is not on your `PATH`. See [Installing LibreOffice](#installing-libreoffice-for-spreadsheets). |
 | Spreadsheet conversion fails or hangs | Close any open LibreOffice windows and try again; a running instance can interfere with headless conversion. |
-| `ModuleNotFoundError: No module named 'fitz'` | Dependencies are not installed in the active environment. Use `uv run`, or activate your venv and run `pip install "pymupdf>=1.24" pillow opencv-python-headless fonttools`. |
+| `Failed to download and build pymupdf==2.x` (uv) | PyMuPDF 2.x could not be installed on this machine. The script pins `pymupdf<2`, so make sure you are using the latest `mtpdf.py`. |
+| `ModuleNotFoundError: No module named 'pymupdf'` | Dependencies are not installed in the active environment. Use `uv run`, or activate your venv and run `pip install "pymupdf>=1.24,<2" pillow opencv-python-headless fonttools`. |
 | `no installed font covers the 'xx' text` | Russian, Chinese, Japanese and Hindi need a font. Put a `.ttf`/`.otf` in a `fonts/` folder next to the script, or use `--font`. See [Fonts for non-Latin languages](#fonts-for-non-latin-languages). |
 | Empty boxes instead of file names | The font lacks the characters in the file names. Use `--font` with a broader Unicode font such as Noto Sans. |
 | `No PDF/image/video files found in that folder.` | The folder has no supported file types at its top level. Check the extensions listed above. |
